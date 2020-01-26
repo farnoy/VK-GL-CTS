@@ -102,6 +102,7 @@ deUint64 getMaxTimelineSemaphoreValueDifference(const InstanceInterface& vk,
 void deviceSignal (const DeviceInterface&	vk,
 				   const VkDevice			device,
 				   const VkQueue			queue,
+				   const deUint32			queueFamilyIndex,
 				   const VkFence			fence,
 				   const VkSemaphore		semaphore,
 				   const deUint64			timelineValue)
@@ -115,6 +116,10 @@ void deviceSignal (const DeviceInterface&	vk,
 		1u,														// deUint32						signalSemaphoreValueCount
 		&timelineValue,											// const deUint64*				pSignalSemaphoreValues
 	};
+	const Unique<VkCommandPool>				cmdPool				(createCommandPool(vk, device, VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT, queueFamilyIndex));
+	Unique<VkCommandBuffer>			cmdBuffer			(makeCommandBuffer(vk, device, *cmdPool));
+	beginCommandBuffer(vk, *cmdBuffer, vk::VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
+	endCommandBuffer(vk, *cmdBuffer);
 	VkSubmitInfo						si[2]		=
 	{
 		{
@@ -123,8 +128,8 @@ void deviceSignal (const DeviceInterface&	vk,
 			0,													// deUint32						waitSemaphoreCount;
 			DE_NULL,											// const VkSemaphore*			pWaitSemaphores;
 			DE_NULL,											// const VkPipelineStageFlags*	pWaitDstStageMask;
-			0,													// deUint32						commandBufferCount;
-			DE_NULL,											// const VkCommandBuffer*		pCommandBuffers;
+			1,													// deUint32						commandBufferCount;
+			&*cmdBuffer,											// const VkCommandBuffer*		pCommandBuffers;
 			1,													// deUint32						signalSemaphoreCount;
 			&semaphore,											// const VkSemaphore*			pSignalSemaphores;
 		},
@@ -144,7 +149,21 @@ void deviceSignal (const DeviceInterface&	vk,
 	VK_CHECK(vk.queueSubmit(queue, 1u, &si[0], DE_NULL));
 	if (fence != DE_NULL) {
 		VK_CHECK(vk.queueSubmit(queue, 1u, &si[1], fence));
-		VK_CHECK(vk.waitForFences(device, 1u, &fence, VK_TRUE, ~(0ull)));
+		if (false) {
+			VK_CHECK(vk.waitForFences(device, 1u, &fence, VK_TRUE, ~(0ull)));
+		} else {
+			const VkSemaphoreWaitInfo		waitInfo	=
+			{
+				VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO,									// VkStructureType			sType;
+				DE_NULL,																// const void*				pNext;
+				0u,	// VkSemaphoreWaitFlagsKHR	flags;
+				1,											// deUint32					semaphoreCount;
+				&semaphore,															// const VkSemaphore*		pSemaphores;
+				&timelineValue,														// const deUint64*			pValues;
+			};
+			// This is not adequate to know when to free `cmdBuffer` when it goes out of scope
+			VK_CHECK(vk.waitSemaphores(device, &waitInfo, ~(0ull)));
+		}
 	}
 }
 
@@ -175,6 +194,7 @@ public:
 	{
 		const DeviceInterface&								vk				= m_context.getDeviceInterface();
 		const VkDevice&										device			= m_context.getDevice();
+		const deUint32										queueFamilyIndex			= m_context.getUniversalQueueFamilyIndex();
 		const VkQueue										queue			= m_context.getUniversalQueue();
 		Unique<VkFence>										fence			(createFence(vk, device));
 		std::vector<SharedPtr<Move<VkSemaphore > > >		semaphorePtrs	(createTimelineSemaphores(vk, device, 100));
@@ -195,7 +215,7 @@ public:
 			{
 				if (m_signalFromDevice)
 				{
-					deviceSignal(vk, device, queue, *fence, semaphores[semIdx], timelineValues[semIdx]);
+					deviceSignal(vk, device, queue, queueFamilyIndex, *fence, semaphores[semIdx], timelineValues[semIdx]);
 					VK_CHECK(vk.resetFences(device, 1, &fence.get()));
 				}
 				else
@@ -207,7 +227,7 @@ public:
 			deUint32	randomIdx	= rng.getInt(0, (deUint32)(semaphores.size() - 1));
 
 			if (m_signalFromDevice)
-				deviceSignal(vk, device, queue, *fence, semaphores[randomIdx], timelineValues[randomIdx]);
+				deviceSignal(vk, device, queue, queueFamilyIndex, *fence, semaphores[randomIdx], timelineValues[randomIdx]);
 			else
 				hostSignal(vk, device, semaphores[randomIdx], timelineValues[randomIdx]);
 		}
@@ -464,6 +484,7 @@ tcu::TestStatus maxDifferenceValueCase (Context& context)
 	const DeviceInterface&							vk							= context.getDeviceInterface();
 	const VkDevice&									device						= context.getDevice();
 	const VkQueue									queue						= context.getUniversalQueue();
+	const deUint32									queueFamilyIndex						= context.getUniversalQueueFamilyIndex();
 	const deUint64									requiredMinValueDifference	= deIntMaxValue32(32);
 	const deUint64									maxTimelineValueDifference	= getMaxTimelineSemaphoreValueDifference(context.getInstanceInterface(), context.getPhysicalDevice());
 	const Unique<VkSemaphore>						semaphore					(createSemaphoreType(vk, device, VK_SEMAPHORE_TYPE_TIMELINE_KHR));
@@ -495,13 +516,13 @@ tcu::TestStatus maxDifferenceValueCase (Context& context)
 		deUint64	fenceValue;
 
 		for (deUint32 j = 1; j <= 10; j++)
-			deviceSignal(vk, device, queue, DE_NULL, *semaphore, ++timelineFrontValue);
+			deviceSignal(vk, device, queue, queueFamilyIndex, DE_NULL, *semaphore, ++timelineFrontValue);
 
 		timelineFrontValue = timelineBackValue + maxTimelineValueDifference - 10;
 		fenceValue = timelineFrontValue;
-		deviceSignal(vk, device, queue, *fence, *semaphore, fenceValue);
+		deviceSignal(vk, device, queue, queueFamilyIndex, *fence, *semaphore, fenceValue);
 		for (deUint32 j = 1; j < 10; j++)
-			deviceSignal(vk, device, queue, DE_NULL, *semaphore, ++timelineFrontValue);
+			deviceSignal(vk, device, queue, queueFamilyIndex, DE_NULL, *semaphore, ++timelineFrontValue);
 
 		deUint64 value;
 		VK_CHECK(vk.getSemaphoreCounterValue(device, *semaphore, &value));
